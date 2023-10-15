@@ -6,6 +6,7 @@ using System.Linq;
 using System.Net;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 
 namespace RegexTest
 {
@@ -13,20 +14,16 @@ namespace RegexTest
     {
         private static void Main(string[] args)
         {
-            string[] testUrls = UrlGenerator.GenerateTestUrls(1000);
-            //Console.WriteLine(string.Join("\n", testUrls));
-            //Console.WriteLine("\n\n");
-            //Console.WriteLine(string.Join("\n", RegexRulesets.stateMachineSupported));
-            //Console.WriteLine("\n\n");
-            //Console.WriteLine(string.Join("\n", RegexRulesets.stateMachineNotSupported));
-            //Console.WriteLine("\n\n\n");
+            string[] testUrls = UrlGenerator.GenerateTestUrls(2500);
 
-            // Assuming that the 'stateMachineSupported' contains an array of regex patterns
-            CheckUrlMatches(testUrls, RegexRulesets.re2Supported, "Re2 Supported", true);
-
+            CheckUrlMatches(testUrls, RegexRulesets.re2Supported, "State Machine Supported");
             Console.WriteLine("\n\n\n");
-            // Assuming that the 'stateMachineNotSupported' contains an array of regex patterns
-            CheckUrlMatches(testUrls, RegexRulesets.allTypes, "Re2 Not Supported", false);
+
+            CheckUrlMatches(testUrls, RegexRulesets.re2Types, "Re2.Net Regex Rule Testset");
+            Console.WriteLine("\n\n\n");
+
+            CheckUrlMatches(testUrls, RegexRulesets.allTypes, "State Machine Unsupported");
+            Console.WriteLine("\n\n\n");
 
             Console.ReadKey();
         }
@@ -53,13 +50,12 @@ namespace RegexTest
                 {
                     stopwatch.Restart();
                     isMatch(url);
-                    isMatch(url);
                     stopwatch.Stop();
                     double runTime = StopMs(stopwatch);
 
                     if (totalMilliseconds > MaxTestTime)
                     {
-                        errors.Add($"TIMEOUOT: {name} took [{runTime}/{totalMilliseconds}]ms!");
+                        errors.Add($"TIMEOUOT: {name}");
                         return -1;
                     }
 
@@ -79,50 +75,47 @@ namespace RegexTest
             }
         }
 
-        private const double MaxTestTime = 10000;
+        private const double MaxTestTime = 30000;
 
-        private static void CheckUrlMatches(string[] testUrls, (string Comment, string[] Rules)[] regexRuleSets, string ruleSetName, bool re2Support)
+        private static void CheckUrlMatches(string[] testUrls, (string Comment, string[] Rules)[] regexRuleSets, string ruleSetName)
         {
-            Console.WriteLine($"---- Checking {ruleSetName} Rules ----");
+            Console.WriteLine($"---- Checking {ruleSetName} Rules vs {testUrls.Length} strings ----");
             Console.WriteLine($"{"Regex Rule",-32} => {"PcreZA, ",12}{"PcreDFA, ",16}{"Pcre, ",16}{"Re2, ",18}{".Net, ",16}");
 
-            foreach (var (comment, rules) in regexRuleSets)
-            {
+            object lockObj = new object();
+            Parallel.ForEach(regexRuleSets, new ParallelOptions { MaxDegreeOfParallelism = 16 }, (ruleSet) => {
+                var (comment, rules) = ruleSet;
                 int r = 0;
-                foreach (string regexRule in rules)
+
+                foreach (var regexRule in rules)
                 {
-                    var dotNet = new Regex(regexRule, RegexOptions.Compiled, TimeSpan.FromMilliseconds(500));
+                    var dotNet = new Regex(regexRule, RegexOptions.Compiled, TimeSpan.FromMilliseconds(1000));
                     var pcre = new PcreRegex(regexRule, new PcreRegexSettings() { Options = PcreOptions.Compiled });
                     var pcreZA = pcre.CreateMatchBuffer();
                     bool pcreZAIsMatch(string str) => pcreZA.IsMatch(new ReadOnlySpan<char>(str.ToCharArray()));
-                    bool pcreDFAIsMatch(string str) => pcre.Dfa.Match(str, new PCRE.Dfa.PcreDfaMatchSettings() { WorkspaceSize = 1024 }).Success;
+                    var pcreDFASettings = new PCRE.Dfa.PcreDfaMatchSettings() { WorkspaceSize = 1024 };
+                    bool pcreDFAIsMatch(string str) => pcre.Dfa.Match(str, pcreDFASettings).Success;
 
-                    Console.Write($"{comment + '-' + r++,-32} => ");
+
 
                     double pcreZAt = TestEngine(testUrls, pcreZAIsMatch, "pcreZA", regexRule);
-                    Console.Write($"{pcreZAt,8:F3}ms 1x, ");
-
                     double pcreDFAt = TestEngine(testUrls, pcreDFAIsMatch, "pcreDFA", regexRule);
-                    Console.Write($"{pcreDFAt,8:F3}ms {pcreZAt / pcreDFAt,2:F2}x, ");
-
                     double pcret = TestEngine(testUrls, pcre.IsMatch, "pcre", regexRule);
-                    Console.Write($"{pcret,8:F3}ms {pcreZAt / pcret,2:F2}x, ");
 
-                    if (re2Support)
+                    double re2t = -1;
+                    try
                     {
-                        var re2 = new Re2.Net.Regex(regexRule);
-                        double re2t = TestEngine(testUrls, re2.IsMatch, "re2", regexRule);
-                        Console.Write($"{re2t,8:F3}ms {pcreZAt / re2t,2:F2}x, ");
+                        re2t = TestEngine(testUrls, new Re2.Net.Regex(regexRule).IsMatch, "re2", regexRule);
                     }
-                    else
-                    {
-                        Console.Write($"{null,8:F3}ms 0x, ");
-                    }
+                    catch (Exception) { }
 
                     double dotNett = TestEngine(testUrls, dotNet.IsMatch, ".Net", regexRule);
-                    Console.WriteLine($"{dotNett,8:F3}ms {pcreZAt / dotNett,2:F2}x");
+
+                    double rP(double eTime) => eTime == -1 ? 0 : (pcreZAt / eTime);
+
+                    lock (lockObj) Console.WriteLine($"{comment + '-' + r++,-32} => {pcreZAt,8:F2}ms 1x, {pcreDFAt,8:F2}ms {rP(pcreDFAt),3:F3}x, {pcret,8:F2}ms {rP(pcret),3:F3}x, {re2t,8:F2}ms {rP(re2t),3:F3}x, {dotNett,8:F2}ms {rP(dotNett),3:F3}x");
                 }
-            }
+            });
 
             foreach (string err in errors) Console.WriteLine(err);
         }
@@ -436,6 +429,74 @@ namespace RegexTest
                 @"(https?|ftp)://[^\s/$.?#].[^\s]*",
                 @"(?:.*[a-z].*){3,}(?:.*[A-Z].*){2,}(?:.*\d.*){2,}[a-zA-Z\d]{8,}"
             })
+        };
+
+        public static readonly (string Comment, string[] Rules)[] re2Types = new[]
+        {
+            ("Twain", new[]
+            {
+                @"Twain"
+            }),
+            ("^Twain", new[]
+            {
+                @"^Twain"
+            }),
+            ("Twain$", new[]
+            {
+                @"Twain$"
+            }),
+            ("Huck[a-zA-Z]+|Finn[a-zA-Z]+", new[]
+            {
+                @"Huck[a-zA-Z]+|Finn[a-zA-Z]+"
+            }),
+            ("a[^x]{20}b", new[]
+            {
+                @"a[^x]{20}b"
+            }),
+            ("Tom|Sawyer|Huckleberry|Finn", new[]
+            {
+                @"Tom|Sawyer|Huckleberry|Finn"
+            }),
+            (".{0,3}(Tom|Sawyer|Huckleberry|Finn)", new[]
+            {
+                @".{0,3}(Tom|Sawyer|Huckleberry|Finn)"
+            }),
+            ("[a-zA-Z]+ing", new[]
+            {
+                @"[a-zA-Z]+ing"
+            }),
+            ("^[a-zA-Z]{0,4}ing[^a-zA-Z]", new[]
+            {
+                @"^[a-zA-Z]{0,4}ing[^a-zA-Z]"
+            }),
+            ("[a-zA-Z]+ing$", new[]
+            {
+                @"[a-zA-Z]+ing$"
+            }),
+            ("^[a-zA-Z ]{5,}$", new[]
+            {
+                @"^[a-zA-Z ]{5,}$"
+            }),
+            ("^.{16,20}$", new[]
+            {
+                @"^.{16,20}$"
+            }),
+            ("([a-f](.[d-m].){0,2}[h-n]){2}", new[]
+            {
+                @"([a-f](.[d-m].){0,2}[h-n]){2}"
+            }),
+            ("([A-Za-z]awyer|[A-Za-z]inn)[^a-zA-Z]", new[]
+            {
+                @"([A-Za-z]awyer|[A-Za-z]inn)[^a-zA-Z]"
+            }),
+            ("Tom.{10,25}river|river.{10,25}Tom", new[]
+            {
+                @"Tom.{10,25}river|river.{10,25}Tom"
+            }),
+            ("\"[^\"{0,30}[?!.]\"", new[]
+            {
+                "\"[^\"{0,30}[?!.]\""
+            }),
         };
 
         public static readonly (string Comment, string[] Rules)[] allTypes = new[]
