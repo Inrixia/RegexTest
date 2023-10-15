@@ -1,6 +1,7 @@
-﻿using PCRE;
+using PCRE;
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Diagnostics;
 using System.Linq;
 using System.Net;
@@ -14,16 +15,16 @@ namespace RegexTest
     {
         private static void Main(string[] args)
         {
-            string[] testUrls = UrlGenerator.GenerateTestUrls(2500);
+            string[] testUrls = UrlGenerator.GenerateTestUrls(2000);
 
-            CheckUrlMatches(testUrls, RegexRulesets.re2Supported, "State Machine Supported");
-            Console.WriteLine("\n\n\n");
+            Console.WriteLine($"---- Running Rules vs {testUrls.Length} strings ----");
+            Console.WriteLine($"PcreZA,,{"PcreDFA,,",18}{"Pcre,,",18}{"Re2,,",18}{".Net,,",18}Regex Rule");
 
-            CheckUrlMatches(testUrls, RegexRulesets.re2Types, "Re2.Net Regex Rule Testset");
-            Console.WriteLine("\n\n\n");
+            CheckUrlMatches(testUrls, RegexRulesets.re2Supported);
+            CheckUrlMatches(testUrls, RegexRulesets.re2Types);
+            CheckUrlMatches(testUrls, RegexRulesets.allTypes);
 
-            CheckUrlMatches(testUrls, RegexRulesets.allTypes, "State Machine Unsupported");
-            Console.WriteLine("\n\n\n");
+            foreach (string err in errors) Console.WriteLine(err);
 
             Console.ReadKey();
         }
@@ -77,47 +78,71 @@ namespace RegexTest
 
         private const double MaxTestTime = 30000;
 
-        private static void CheckUrlMatches(string[] testUrls, (string Comment, string[] Rules)[] regexRuleSets, string ruleSetName)
+        private static void ValidateEngine(string[] testUrls, Func<string, bool> isMatch, Func<string, bool> validator)
         {
-            Console.WriteLine($"---- Checking {ruleSetName} Rules vs {testUrls.Length} strings ----");
-            Console.WriteLine($"{"Regex Rule",-32} => {"PcreZA, ",12}{"PcreDFA, ",16}{"Pcre, ",16}{"Re2, ",18}{".Net, ",16}");
+            foreach (string url in testUrls)
+            {
+                if (isMatch(url) != validator(url)) throw new InvalidOperationException("Wut Wut! No Match??");
+            }
+        }
 
+        private static void CheckUrlMatches(string[] testUrls, (string Comment, string[] Rules)[] regexRuleSets)
+        {
             object lockObj = new object();
-            Parallel.ForEach(regexRuleSets, new ParallelOptions { MaxDegreeOfParallelism = 16 }, (ruleSet) => {
-                var (comment, rules) = ruleSet;
-                int r = 0;
-
+            List<Task> tasks = new List<Task>();
+            foreach (var (comment, rules) in regexRuleSets)
+            {
                 foreach (var regexRule in rules)
                 {
-                    var dotNet = new Regex(regexRule, RegexOptions.Compiled, TimeSpan.FromMilliseconds(1000));
-                    var pcre = new PcreRegex(regexRule, new PcreRegexSettings() { Options = PcreOptions.Compiled });
-                    var pcreZA = pcre.CreateMatchBuffer();
-                    bool pcreZAIsMatch(string str) => pcreZA.IsMatch(new ReadOnlySpan<char>(str.ToCharArray()));
-                    var pcreDFASettings = new PCRE.Dfa.PcreDfaMatchSettings() { WorkspaceSize = 1024 };
-                    bool pcreDFAIsMatch(string str) => pcre.Dfa.Match(str, pcreDFASettings).Success;
+                    tasks.Add(Task.Run(() => {
+                        var dotNet = new Regex(regexRule, RegexOptions.Compiled, TimeSpan.FromMilliseconds(1000));
+                        var pcre = new PcreRegex(regexRule, new PcreRegexSettings() { Options = PcreOptions.Compiled | PcreOptions.MatchInvalidUtf });
+                        var pcreZA = new PcreRegex(regexRule, new PcreRegexSettings() { Options = PcreOptions.Compiled | PcreOptions.MatchInvalidUtf }).CreateMatchBuffer(new PcreMatchSettings() { DepthLimit = uint.MaxValue, HeapLimit = uint.MaxValue, MatchLimit = uint.MaxValue });
+
+                        bool pcreZAIsMatch(string str) => pcreZA.IsMatch(str.AsSpan());
 
 
+                        var pcreDFA = new PcreRegex(regexRule, new PcreRegexSettings() { Options = PcreOptions.Compiled });
+                        var pcreDFASettings = new PCRE.Dfa.PcreDfaMatchSettings() { WorkspaceSize = 2048, AdditionalOptions = PCRE.Dfa.PcreDfaMatchOptions.NoUtfCheck };
+                        bool pcreDFAIsMatch(string str) => pcreDFA.Dfa.Match(str, pcreDFASettings).Success;
 
-                    double pcreZAt = TestEngine(testUrls, pcreZAIsMatch, "pcreZA", regexRule);
-                    double pcreDFAt = TestEngine(testUrls, pcreDFAIsMatch, "pcreDFA", regexRule);
-                    double pcret = TestEngine(testUrls, pcre.IsMatch, "pcre", regexRule);
+                        //Task.Run(() => ValidateEngine(testUrls, pcreZAIsMatch, pcre.IsMatch));
+                        //Task.Run(() => ValidateEngine(testUrls, pcreZAIsMatch, pcre.IsMatch));
 
-                    double re2t = -1;
-                    try
-                    {
-                        re2t = TestEngine(testUrls, new Re2.Net.Regex(regexRule).IsMatch, "re2", regexRule);
-                    }
-                    catch (Exception) { }
+                        double pcreZAt = TestEngine(testUrls, pcreZAIsMatch, "pcreZA", regexRule);
 
-                    double dotNett = TestEngine(testUrls, dotNet.IsMatch, ".Net", regexRule);
+                        double re2t = -1;
+                        try
+                        {
+                            re2t = TestEngine(testUrls, new Re2.Net.Regex(regexRule).IsMatch, "re2", regexRule);
+                        }
+                        catch (Exception) { }
 
-                    double rP(double eTime) => eTime == -1 ? 0 : (pcreZAt / eTime);
+                        double pcreDFAt = -1;
+                        pcreDFAt = TestEngine(testUrls, pcreDFAIsMatch, "pcreDFA", regexRule);
+                        double dotNett = -1;
+                        dotNett = TestEngine(testUrls, dotNet.IsMatch, ".Net", regexRule);
+                        double pcret = -1;
+                        pcret = TestEngine(testUrls, pcre.IsMatch, "pcre", regexRule);
 
-                    lock (lockObj) Console.WriteLine($"{comment + '-' + r++,-32} => {pcreZAt,8:F2}ms 1x, {pcreDFAt,8:F2}ms {rP(pcreDFAt),3:F3}x, {pcret,8:F2}ms {rP(pcret),3:F3}x, {re2t,8:F2}ms {rP(re2t),3:F3}x, {dotNett,8:F2}ms {rP(dotNett),3:F3}x");
+                        double rP(double eTime)
+                        {
+                            if (eTime != -1)
+                            {
+                                if (pcret == -1) return 1;
+                                return pcret / eTime;
+                            }
+                            return -1;
+                        }
+
+                        lock (lockObj)
+                        {
+                            Console.WriteLine($"{pcreZAt,8:F2}ms, {rP(pcreZAt),2:F2}x, {pcreDFAt,8:F2}ms, {rP(pcreDFAt),2:F2}x, {pcret,8:F2}ms, {rP(pcret),2:F2}x, {re2t,8:F2}ms, {rP(re2t),2:F2}x, {dotNett,8:F2}ms, {rP(dotNett),2:F2}x, \"{regexRule}\"");
+                        }
+                    }));
                 }
-            });
-
-            foreach (string err in errors) Console.WriteLine(err);
+            }
+            Task.WhenAll(tasks);
         }
     }
 
@@ -160,6 +185,7 @@ namespace RegexTest
                     foreach (string query in oDataQueries)
                     {
                         urls.Add($"https://{RndDnsName()}/{RndStr()}/{api}{query}");
+                        urls.Add(RndStr() + RndDnsName() + RndStr() + RndQStr() + RndStr() + Guid.NewGuid() + RndStr() + api + RndStr() + query + RndStr());
                     }
                 }
                 urls.Add($"https://{RndDnsName()}/_api/web/lists/getbytitle('{RndStr()}')/items");
@@ -171,6 +197,7 @@ namespace RegexTest
                 {
                     urls.Add($"https://{RndDnsName()}/sites/{RndStr()}/Style%20Library/{RndStr()}.{asset}");
                     urls.Add($"https://{RndDnsName()}/sites/{RndStr()}/Style%20Library/{RndStr()}.{asset}{RndQStr()}");
+                    urls.Add(RndStr() + RndDnsName() + RndStr() + RndQStr() + RndStr() + Guid.NewGuid() + RndStr() + asset + RndStr());
                 }
 
                 // Document URL with Version
@@ -190,7 +217,7 @@ namespace RegexTest
 
         private static string RndStr()
         {
-            int length = rnd.Next(5, 15);
+            int length = rnd.Next(8, 64);
             char[] stringChars = new char[length];
 
             for (int i = 0; i < length; i++) stringChars[i] = chars[rnd.Next(chars.Length)];
@@ -204,9 +231,9 @@ namespace RegexTest
             "eu", "us", "uk", "de", "ca", "fr", "au", "br", "cn", "ru", "jp",
         };
         private const string dnsChars = "abcdefghijklmnopqrstuvwxyz0123456789-";
-        private static string RndDnsStr(int minLength = 2, int maxLength = 8)
+        private static string RndDnsStr()
         {
-            int length = rnd.Next(minLength, maxLength + 1);
+            int length = rnd.Next(2, 16);
             char[] domainChars = new char[length];
 
             // Ensuring the first character is not a hyphen.
@@ -239,7 +266,7 @@ namespace RegexTest
 
         private static string RndQStr()
         {
-            int paramCount = rnd.Next(1, 5);
+            int paramCount = rnd.Next(1, 8);
             StringBuilder sb = new StringBuilder("?");
             for (int i = 0; i < paramCount; i++)
             {
