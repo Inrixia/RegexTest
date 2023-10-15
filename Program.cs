@@ -20,9 +20,6 @@ namespace RegexTest
             Console.WriteLine($"---- Running Rules vs {testUrls.Length} strings ----");
             Console.WriteLine($"PcreZA,,{"PcreDFA,,",18}{"Pcre,,",18}{"Re2,,",18}{".Net,,",18}Regex Rule");
 
-            CheckUrlMatches(testUrls, RegexRulesets.re2Supported);
-            CheckUrlMatches(testUrls, RegexRulesets.re2Types);
-            CheckUrlMatches(testUrls, RegexRulesets.allTypes);
 
             foreach (string err in errors) Console.WriteLine(err);
 
@@ -78,14 +75,6 @@ namespace RegexTest
 
         private const double MaxTestTime = 30000;
 
-        private static void ValidateEngine(string[] testUrls, Func<string, bool> isMatch, Func<string, bool> validator)
-        {
-            foreach (string url in testUrls)
-            {
-                if (isMatch(url) != validator(url)) throw new InvalidOperationException("Wut Wut! No Match??");
-            }
-        }
-
         private static void CheckUrlMatches(string[] testUrls, (string Comment, string[] Rules)[] regexRuleSets)
         {
             object lockObj = new object();
@@ -94,55 +83,69 @@ namespace RegexTest
             {
                 foreach (var regexRule in rules)
                 {
-                    tasks.Add(Task.Run(() => {
-                        var dotNet = new Regex(regexRule, RegexOptions.Compiled, TimeSpan.FromMilliseconds(1000));
-                        var pcre = new PcreRegex(regexRule, new PcreRegexSettings() { Options = PcreOptions.Compiled | PcreOptions.MatchInvalidUtf });
-                        var pcreZA = new PcreRegex(regexRule, new PcreRegexSettings() { Options = PcreOptions.Compiled | PcreOptions.MatchInvalidUtf }).CreateMatchBuffer(new PcreMatchSettings() { DepthLimit = uint.MaxValue, HeapLimit = uint.MaxValue, MatchLimit = uint.MaxValue });
-
-                        bool pcreZAIsMatch(string str) => pcreZA.IsMatch(str.AsSpan());
-
-
-                        var pcreDFA = new PcreRegex(regexRule, new PcreRegexSettings() { Options = PcreOptions.Compiled });
-                        var pcreDFASettings = new PCRE.Dfa.PcreDfaMatchSettings() { WorkspaceSize = 2048, AdditionalOptions = PCRE.Dfa.PcreDfaMatchOptions.NoUtfCheck };
-                        bool pcreDFAIsMatch(string str) => pcreDFA.Dfa.Match(str, pcreDFASettings).Success;
-
-                        //Task.Run(() => ValidateEngine(testUrls, pcreZAIsMatch, pcre.IsMatch));
-                        //Task.Run(() => ValidateEngine(testUrls, pcreZAIsMatch, pcre.IsMatch));
-
-                        double pcreZAt = TestEngine(testUrls, pcreZAIsMatch, "pcreZA", regexRule);
-
-                        double re2t = -1;
-                        try
-                        {
-                            re2t = TestEngine(testUrls, new Re2.Net.Regex(regexRule).IsMatch, "re2", regexRule);
-                        }
-                        catch (Exception) { }
-
-                        double pcreDFAt = -1;
-                        pcreDFAt = TestEngine(testUrls, pcreDFAIsMatch, "pcreDFA", regexRule);
-                        double dotNett = -1;
-                        dotNett = TestEngine(testUrls, dotNet.IsMatch, ".Net", regexRule);
-                        double pcret = -1;
-                        pcret = TestEngine(testUrls, pcre.IsMatch, "pcre", regexRule);
-
-                        double rP(double eTime)
-                        {
-                            if (eTime != -1)
-                            {
-                                if (pcret == -1) return 1;
-                                return pcret / eTime;
-                            }
-                            return -1;
-                        }
-
-                        lock (lockObj)
-                        {
-                            Console.WriteLine($"{pcreZAt,8:F2}ms, {rP(pcreZAt),2:F2}x, {pcreDFAt,8:F2}ms, {rP(pcreDFAt),2:F2}x, {pcret,8:F2}ms, {rP(pcret),2:F2}x, {re2t,8:F2}ms, {rP(re2t),2:F2}x, {dotNett,8:F2}ms, {rP(dotNett),2:F2}x, \"{regexRule}\"");
-                        }
-                    }));
+                    //tasks.Add(Task.Run(() => BenchRule(testUrls, lockObj, regexRule)));
+                    tasks.Add(Task.Run(() => ValidateRule(testUrls, regexRule)));
                 }
             }
             Task.WhenAll(tasks);
+        }
+
+        private static void ValidateRule(string[] testUrls, string regexRule)
+        {
+            var pcre = new PcreRegex(regexRule, new PcreRegexSettings() { Options = PcreOptions.Compiled | PcreOptions.MatchInvalidUtf });
+            var pcreZA = new PcreRegex(regexRule, new PcreRegexSettings() { Options = PcreOptions.Compiled | PcreOptions.MatchInvalidUtf }).CreateMatchBuffer(new PcreMatchSettings() { DepthLimit = uint.MaxValue, HeapLimit = uint.MaxValue, MatchLimit = uint.MaxValue });
+
+            bool pcreZAIsMatch(string str) => pcreZA.IsMatch(str.AsSpan());
+
+            foreach (string url in testUrls)
+            {
+                if (pcreZAIsMatch(url) != pcre.IsMatch(url)) throw new InvalidOperationException("Wut Wut! No Match??");
+            }
+        }
+
+        private static void BenchRule(string[] testUrls, object lockObj, string regexRule)
+        {
+            var dotNet = new Regex(regexRule, RegexOptions.Compiled, TimeSpan.FromMilliseconds(1000));
+            var pcre = new PcreRegex(regexRule, new PcreRegexSettings() { Options = PcreOptions.Compiled | PcreOptions.MatchInvalidUtf });
+            var pcreZA = new PcreRegex(regexRule, new PcreRegexSettings() { Options = PcreOptions.Compiled | PcreOptions.MatchInvalidUtf }).CreateMatchBuffer(new PcreMatchSettings() { DepthLimit = uint.MaxValue, HeapLimit = uint.MaxValue, MatchLimit = uint.MaxValue });
+
+            bool pcreZAIsMatch(string str) => pcreZA.IsMatch(str.AsSpan());
+
+
+            var pcreDFA = new PcreRegex(regexRule, new PcreRegexSettings() { Options = PcreOptions.Compiled });
+            var pcreDFASettings = new PCRE.Dfa.PcreDfaMatchSettings() { WorkspaceSize = 2048, AdditionalOptions = PCRE.Dfa.PcreDfaMatchOptions.NoUtfCheck };
+            bool pcreDFAIsMatch(string str) => pcreDFA.Dfa.Match(str, pcreDFASettings).Success;
+
+            double pcreZAt = TestEngine(testUrls, pcreZAIsMatch, "pcreZA", regexRule);
+
+            double re2t = -1;
+            try
+            {
+                re2t = TestEngine(testUrls, new Re2.Net.Regex(regexRule).IsMatch, "re2", regexRule);
+            }
+            catch (Exception) { }
+
+            double pcreDFAt = -1;
+            pcreDFAt = TestEngine(testUrls, pcreDFAIsMatch, "pcreDFA", regexRule);
+            double dotNett = -1;
+            dotNett = TestEngine(testUrls, dotNet.IsMatch, ".Net", regexRule);
+            double pcret = -1;
+            pcret = TestEngine(testUrls, pcre.IsMatch, "pcre", regexRule);
+
+            double rP(double eTime)
+            {
+                if (eTime != -1)
+                {
+                    if (pcret == -1) return 1;
+                    return pcret / eTime;
+                }
+                return -1;
+            }
+
+            lock (lockObj)
+            {
+                Console.WriteLine($"{pcreZAt,8:F2}ms, {rP(pcreZAt),2:F2}x, {pcreDFAt,8:F2}ms, {rP(pcreDFAt),2:F2}x, {pcret,8:F2}ms, {rP(pcret),2:F2}x, {re2t,8:F2}ms, {rP(re2t),2:F2}x, {dotNett,8:F2}ms, {rP(dotNett),2:F2}x, \"{regexRule}\"");
+            }
         }
     }
 
