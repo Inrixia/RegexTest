@@ -15,11 +15,14 @@ namespace RegexTest
     {
         private static void Main(string[] args)
         {
-            string[] testUrls = UrlGenerator.GenerateTestUrls(2000);
+            string[] testUrls = UrlGenerator.GenerateTestUrls(50);
 
             Console.WriteLine($"---- Running Rules vs {testUrls.Length} strings ----");
             Console.WriteLine($"PcreZA,,{"PcreDFA,,",18}{"Pcre,,",18}{"Re2,,",18}{".Net,,",18}Regex Rule");
 
+            CheckUrlMatches(testUrls, RegexRulesets.re2Supported);
+            CheckUrlMatches(testUrls, RegexRulesets.re2Types);
+            CheckUrlMatches(testUrls, RegexRulesets.allTypes);
 
             foreach (string err in errors) Console.WriteLine(err);
 
@@ -83,23 +86,41 @@ namespace RegexTest
             {
                 foreach (var regexRule in rules)
                 {
+                    //// Bench threads
                     //tasks.Add(Task.Run(() => BenchRule(testUrls, lockObj, regexRule)));
-                    tasks.Add(Task.Run(() => ValidateRule(testUrls, regexRule)));
+
+                    // Validate threads
+                    var pcre = new PcreRegex(regexRule, new PcreRegexSettings() { Options = PcreOptions.Compiled | PcreOptions.MatchInvalidUtf });
+                    var pcreZA = new PcreRegex(regexRule, new PcreRegexSettings() { Options = PcreOptions.Compiled | PcreOptions.MatchInvalidUtf }).CreateMatchBuffer(new PcreMatchSettings() { DepthLimit = uint.MaxValue, HeapLimit = uint.MaxValue, MatchLimit = uint.MaxValue });
+                    bool pcreZAIsMatch(string str) => pcreZA.IsMatch(str.AsSpan());
+                    for (int i = 0; i < 32; i++)
+                    {
+                        tasks.Add(Task.Run(() => ValidateRule(testUrls, regexRule, pcreZAIsMatch, pcre.IsMatch)));
+                    }
+                    Task.WhenAll(tasks);
+                    foreach (string err in errors) Console.WriteLine(err);
                 }
             }
             Task.WhenAll(tasks);
         }
 
-        private static void ValidateRule(string[] testUrls, string regexRule)
+        private static void ValidateRule(string[] testUrls, string regexRule, Func<string, bool> isMatch, Func<string, bool> validator)
         {
-            var pcre = new PcreRegex(regexRule, new PcreRegexSettings() { Options = PcreOptions.Compiled | PcreOptions.MatchInvalidUtf });
-            var pcreZA = new PcreRegex(regexRule, new PcreRegexSettings() { Options = PcreOptions.Compiled | PcreOptions.MatchInvalidUtf }).CreateMatchBuffer(new PcreMatchSettings() { DepthLimit = uint.MaxValue, HeapLimit = uint.MaxValue, MatchLimit = uint.MaxValue });
-
-            bool pcreZAIsMatch(string str) => pcreZA.IsMatch(str.AsSpan());
-
-            foreach (string url in testUrls)
+            try
             {
-                if (pcreZAIsMatch(url) != pcre.IsMatch(url)) throw new InvalidOperationException("Wut Wut! No Match??");
+                foreach (string url in testUrls)
+                {
+                    if (isMatch(url) != validator(url))
+                    {
+                        errors.Add("Wut Wut! No Match??");
+                        break;
+                    }
+                }
+
+            }
+            catch (Exception exp)
+            {
+                errors.Add(exp.Message);
             }
         }
 
